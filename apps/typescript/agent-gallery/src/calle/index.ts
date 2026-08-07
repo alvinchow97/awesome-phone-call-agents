@@ -28,3 +28,5 @@ export { classifyDelivery, isTerminalStatus, normalizeStatus, TERMINAL_STATUSES 
 export type { Delivery } from "./status";
 
 export { maskE164 } from "./mask";
+
+export { describeActivity } from "./activity";
