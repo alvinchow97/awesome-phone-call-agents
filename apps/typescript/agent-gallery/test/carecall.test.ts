@@ -6,6 +6,7 @@ import {
   detectCareCallSafetyFlags,
   validateCareCallRequest,
   careCallRoutineKinds,
+  outcomesForKind,
   type CareCallRequest,
   type CareCallRoutineKind,
 } from "../src/workflows/carecall";
@@ -76,6 +77,40 @@ test("meal goal checks food access and missing delivery", () => {
   const goal = buildCareCallGoal(request("meal"));
   assert.match(goal, /whether food is available/i);
   assert.match(goal, /expected delivery arrived/i);
+});
+
+test("hydration goal checks drink access and sets no fluid target", () => {
+  const goal = buildCareCallGoal(request("hydration"));
+  assert.match(goal, /has no drink within reach/i);
+  assert.match(goal, /Never set a fluid target/i);
+});
+
+test("wellbeing goal records what was said instead of assessing mood", () => {
+  const goal = buildCareCallGoal(request("wellbeing"));
+  assert.match(goal, /one open question/i);
+  assert.match(goal, /Never assess mood, screen for any condition, or counsel/i);
+});
+
+test("appointment goal repeats confirmed details and never books or cancels", () => {
+  const goal = buildCareCallGoal(request("appointment"));
+  assert.match(goal, /acknowledges the appointment/i);
+  assert.match(goal, /Never book, move, or cancel an appointment/i);
+});
+
+test("every routine kind's goal offers only its own outcome vocabulary", () => {
+  for (const kind of careCallRoutineKinds) {
+    const goal = buildCareCallGoal(request(kind));
+    for (const token of outcomesForKind(kind)) {
+      assert.ok(goal.includes(token), `${kind} goal should offer its own outcome token "${token}"`);
+    }
+    for (const otherKind of careCallRoutineKinds) {
+      if (otherKind === kind) continue;
+      const exclusive = outcomesForKind(otherKind).filter((token) => !outcomesForKind(kind).includes(token));
+      for (const token of exclusive) {
+        assert.ok(!goal.includes(token), `${kind} goal should not offer ${otherKind}'s "${token}" token`);
+      }
+    }
+  }
 });
 
 test("provider task completion alone never proves medication was taken", () => {
