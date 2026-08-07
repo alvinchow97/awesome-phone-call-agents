@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { handleCancelCareCallJob, handleEnqueueCareCall, handleListCareCallJobs, handleQueueWorker, processQueueMessage, queueOperationalSnapshot, type CareCallJob, type QueueWakeMessage } from "../api/_lib/call-queue";
+import { enqueueScheduledOccurrence, handleCancelCareCallJob, handleEnqueueCareCall, handleGetCareCallJob, handleListCareCallJobs, handleQueueWorker, processQueueMessage, queueOperationalSnapshot, type CareCallJob, type QueueWakeMessage } from "../api/_lib/call-queue";
 import { MemoryDurableStore, type DurableStore } from "../api/_lib/durable-store";
 import { issueOperatorSession } from "../api/_lib/operator-auth";
+import { encryptSchedulePhone, type CareSchedule } from "../api/_lib/schedules";
 import type { CareCallRequest } from "../src/workflows/carecall";
 import { FAKE_SERVER_URL, FAKE_TOKEN, createFakeCalle } from "./fake-calle-server";
 
@@ -28,7 +29,10 @@ function environment() {
       CALLE_ACCESS_TOKEN: FAKE_TOKEN,
       CALLE_SERVER_URL: FAKE_SERVER_URL,
       CARECALL_SESSION_SECRET: "test-session-secret-that-is-at-least-32-characters",
-      CARECALL_OPERATORS_JSON: JSON.stringify([{ id: "mei-chen", name: "Mei Chen", role: "coordinator", access_code_sha256: "1427b7e058bb398ae674d86981bc0e4f796661abc0ccbba06c3e9ec611f9f07f", senior_ids: ["mdm-lim"] }]),
+      CARECALL_OPERATORS_JSON: JSON.stringify([
+        { id: "mei-chen", name: "Mei Chen", role: "coordinator", access_code_sha256: "1427b7e058bb398ae674d86981bc0e4f796661abc0ccbba06c3e9ec611f9f07f", senior_ids: ["mdm-lim"] },
+        { id: "priya-nair", name: "Priya Nair", role: "viewer", access_code_sha256: "1427b7e058bb398ae674d86981bc0e4f796661abc0ccbba06c3e9ec611f9f07f", senior_ids: ["mdm-lim"] },
+      ]),
       CARECALL_DATA_ENCRYPTION_KEY: "schedule-encryption-secret-with-32-characters",
       CARECALL_PUBLIC_BASE_URL: "https://example.test",
       durableStore,
@@ -146,6 +150,43 @@ test("a cancellation that lands mid-dispatch wins the race, and the provider is 
   assert.equal(await realStore.get("carecall:queue:active"), null, "the worker must release the active lease it can no longer use");
 });
 
+test("a viewer-scoped operator cannot enqueue or cancel a call, but can still read the queue", async () => {
+  const { env } = environment();
+  await handleEnqueueCareCall(await authorizedRequest(request("viewer-scope"), env), env);
+  const viewerToken = await issueOperatorSession("priya-nair", ACCESS_CODE, env);
+  assert.ok(viewerToken);
+
+  const enqueueResponse = await handleEnqueueCareCall(
+    new Request("https://example.test/api/carecall/jobs", { method: "POST", headers: { authorization: `Bearer ${viewerToken}` }, body: JSON.stringify(request("viewer-attempt")) }),
+    env,
+  );
+  assert.equal(enqueueResponse.status, 403);
+  assert.equal((await enqueueResponse.json()).error, "role_not_permitted");
+  assert.equal(await env.durableStore.get("carecall:job:job-viewer-attempt"), null, "a viewer's enqueue attempt must not create a job");
+
+  const cancelResponse = await handleCancelCareCallJob(
+    new Request("https://example.test/api/carecall/jobs/job-viewer-scope", { method: "DELETE", headers: { authorization: `Bearer ${viewerToken}` } }),
+    "job-viewer-scope",
+    env,
+  );
+  assert.equal(cancelResponse.status, 403);
+  assert.equal((await cancelResponse.json()).error, "role_not_permitted");
+  assert.equal((await env.durableStore.get<CareCallJob>("carecall:job:job-viewer-scope"))?.state, "queued", "a viewer's cancel attempt must not touch the job");
+
+  const listResponse = await handleListCareCallJobs(
+    new Request("https://example.test/api/carecall/jobs", { headers: { authorization: `Bearer ${viewerToken}` } }),
+    env,
+  );
+  assert.equal(listResponse.status, 200, "a viewer must still be able to read the queue");
+
+  const detailResponse = await handleGetCareCallJob(
+    new Request("https://example.test/api/carecall/jobs/job-viewer-scope", { headers: { authorization: `Bearer ${viewerToken}` } }),
+    "job-viewer-scope",
+    env,
+  );
+  assert.equal(detailResponse.status, 200, "a viewer must still be able to read a job's detail");
+});
+
 test("the operator call list is scoped, paginated, and excludes protected call inputs", async () => {
   const { env } = environment();
   await handleEnqueueCareCall(await authorizedRequest(request("list-first"), env), env);
@@ -254,6 +295,43 @@ test("a manual authorization expires instead of waiting indefinitely in the queu
   const expired = await env.durableStore.get<CareCallJob>("carecall:job:job-expired-manual");
   assert.equal(expired?.state, "needs_review");
   assert.equal(expired?.failure_reason, "manual_authorization_expired");
+});
+
+test("a scheduled occurrence found well past its window is sent to review instead of dialed late", async () => {
+  const { env } = environment();
+  const now = Date.now();
+  const schedule: CareSchedule = {
+    id: "schedule-late",
+    status: "active",
+    frequency: "daily",
+    time_sgt: "08:00",
+    next_run: new Date(now - 60 * 60_000).toISOString(),
+    review_date: new Date(now + 7 * 86_400_000).toISOString(),
+    skip_dates: [],
+    phone_ciphertext: await encryptSchedulePhone("+6580000000", env.CARECALL_DATA_ENCRYPTION_KEY),
+    senior: { id: "mdm-lim", preferred_name: "Mdm Lim", language: "English", permitted_call_window: "12:00 AM–11:59 PM" },
+    routine: { id: "routine-late", title: "Morning medication", kind: "medication", caregiver_instruction: "Repeat the approved reminder.", caregiver_name: "Joanne Lim", trust_phrase: "Joanne asked me to call." },
+    organisation: { name: "Queenstown Care Team", timezone: "Asia/Singapore" },
+    created_by: { id: "mei-chen", name: "Mei Chen", role: "coordinator", senior_ids: ["mdm-lim"] },
+    created_at: new Date(now - 2 * 86_400_000).toISOString(),
+  };
+  const job = await enqueueScheduledOccurrence(schedule, env);
+  // dispatchJob checks the schedule is still active for this job, so the
+  // schedule record itself must exist too -- exactly as handleSchedules'
+  // POST handler leaves it after creating the first occurrence.
+  schedule.current_job_id = job.id;
+  await env.durableStore.set(`carecall:schedule:${schedule.id}`, schedule);
+  // Still inside "12:00 AM-11:59 PM" (all day), so only the lateness grace --
+  // not the call window -- can be what stops this from dialing.
+
+  const fake = createFakeCalle();
+  await withFakeCalle(() => processQueueMessage({ type: "dispatch", job_id: job.id }, env), fake);
+
+  const after = await env.durableStore.get<CareCallJob>(`carecall:job:${job.id}`);
+  assert.equal(after?.state, "needs_review");
+  assert.equal(after?.failure_reason, "scheduled_occurrence_missed");
+  assert.equal(fake.runCallAttempts, 0, "a call an hour late must not be dialed just because the call window is still open");
+  assert.equal(await env.durableStore.get("carecall:queue:active"), null, "a doomed job must not strand the single active-call lease");
 });
 
 test("the public queue worker rejects unsigned delivery", async () => {

@@ -91,6 +91,36 @@ test("scheduler safely expires due schedules whose review date has passed", asyn
   assert.deepEqual(await store.readDueIndex("carecall:schedules:due", now.getTime()), []);
 });
 
+test("a viewer-scoped operator cannot create or update a schedule", async () => {
+  const store = new MemoryDurableStore();
+  const env = {
+    CARECALL_SESSION_SECRET: "test-session-secret-that-is-at-least-32-characters",
+    CARECALL_OPERATORS_JSON: JSON.stringify([
+      { id: "priya-nair", name: "Priya Nair", role: "viewer", access_code_sha256: "1427b7e058bb398ae674d86981bc0e4f796661abc0ccbba06c3e9ec611f9f07f", senior_ids: ["mdm-lim"] },
+    ]),
+    CARECALL_DATA_ENCRYPTION_KEY: "schedule-encryption-secret-with-32-characters",
+    CARECALL_PUBLIC_BASE_URL: "https://example.test",
+    durableStore: store,
+    queuePublisher: async () => {},
+  };
+  const token = await issueOperatorSession("priya-nair", "test-operator-code", env);
+  assert.ok(token);
+  const call: CareCallRequest = {
+    workflow: "carecall", request_key: "viewer-schedule-attempt", organisation: { name: "CareCall SG", timezone: "Asia/Singapore" },
+    senior: { id: "mdm-lim", preferred_name: "Mdm Lim", phone_e164: "+6580000000", language: "English", authority_confirmed: true, permitted_call_window: "12:00 AM–11:59 PM" },
+    routine: { id: "routine-viewer-attempt", title: "Lunch", kind: "meal", caregiver_instruction: "Please have lunch.", caregiver_name: "Mei", trust_phrase: "orchid" },
+    authorization: { exactly_one_call: true, authorized_at: new Date().toISOString() },
+  };
+  const create = await handleSchedules(new Request("https://example.test/api/carecall/schedules", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ call, frequency: "daily", time_sgt: "23:59", review_date: new Date(Date.now() + 7 * 86_400_000).toISOString(), recurring_authority_confirmed: true, skip_dates: [] }) }), env);
+  assert.equal(create.status, 403);
+  assert.equal((await create.json()).error, "role_not_permitted");
+  assert.equal(await store.get("carecall:schedule:schedule-routine-viewer-attempt"), null, "a viewer's create attempt must not create a schedule");
+
+  const update = await handleSchedules(new Request("https://example.test/api/carecall/schedules", { method: "PATCH", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ schedule_id: "schedule-routine-viewer-attempt", status: "cancelled" }) }), env);
+  assert.equal(update.status, 403);
+  assert.equal((await update.json()).error, "role_not_permitted");
+});
+
 test("schedule activation queues one occurrence and pause invalidates it", async () => {
   const store = new MemoryDurableStore();
   const messages: QueueWakeMessage[] = [];

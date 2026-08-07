@@ -1,6 +1,6 @@
 import { envFromProcess, storeFor } from "../_lib/calls";
 import { cancelQueuedJobForSchedule, enqueueScheduledOccurrence, type QueueRuntimeEnv } from "../_lib/call-queue";
-import { authenticateOperator, operatorCanAccessSenior } from "../_lib/operator-auth";
+import { authenticateOperator, operatorCanAccessSenior, operatorCanMutate } from "../_lib/operator-auth";
 import { encryptSchedulePhone, nextEligibleOccurrence, type CareSchedule, type ScheduleFrequency, type ScheduleStatus } from "../_lib/schedules";
 import { isScheduledTimeWithinPermittedWindow, validateCareCallRequest, type CareCallRequest } from "../../src/workflows/carecall";
 
@@ -11,6 +11,9 @@ const json = (payload: unknown, status = 200) => new Response(JSON.stringify(pay
 export async function handleSchedules(request: Request, env: QueueRuntimeEnv): Promise<Response> {
   const operator = await authenticateOperator(request, env);
   if (!operator) return json({ error: "invalid_operator_session" }, 401);
+  // Every request this handler accepts (create or update a schedule) is a
+  // mutation; there is no read branch here to exempt.
+  if (!operatorCanMutate(operator)) return json({ error: "role_not_permitted" }, 403);
   const store = storeFor(env);
   if (!store || !env.CARECALL_DATA_ENCRYPTION_KEY) return json({ error: "schedule_storage_not_configured" }, 503);
 

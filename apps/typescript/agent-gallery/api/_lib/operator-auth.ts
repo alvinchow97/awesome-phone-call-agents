@@ -106,4 +106,20 @@ export function operatorCanAccessSenior(operator: OperatorSession, seniorId: str
   return operator.role === "admin" || operator.senior_ids.includes("*") || operator.senior_ids.includes(seniorId);
 }
 
+/**
+ * Whether this operator may perform a side effect (enqueue or cancel a call,
+ * create or cancel a schedule, acknowledge a case) rather than only read.
+ * `viewer` is read-only; every other configured role may mutate.
+ *
+ * Callers driven directly by an operator's own request must check this.
+ * `handleCreateCall` in calls.ts deliberately does not: the queue worker
+ * reaches it through issueTrustedOperatorSession, reissuing the *creating*
+ * operator's session to actually place the call, and that creating operator
+ * was already required to pass this check when the call or schedule was
+ * enqueued.
+ */
+export function operatorCanMutate(operator: OperatorSession): boolean {
+  return operator.role !== "viewer";
+}
+
 export async function hashOperatorAccessCodeForSetup(accessCode: string): Promise<string> { return sha256(accessCode); }

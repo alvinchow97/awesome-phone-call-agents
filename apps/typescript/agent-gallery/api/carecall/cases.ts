@@ -1,5 +1,5 @@
-import { envFromProcess, storeFor } from "../_lib/calls";
-import { authenticateOperator, operatorCanAccessSenior } from "../_lib/operator-auth";
+import { envFromProcess, storeFor, type CalleEnv } from "../_lib/calls";
+import { authenticateOperator, operatorCanAccessSenior, operatorCanMutate } from "../_lib/operator-auth";
 
 export const config = { runtime: "edge" };
 const headers = { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" };
@@ -7,8 +7,7 @@ const json = (payload: unknown, status = 200) => new Response(JSON.stringify(pay
 
 interface CaseRecord { id: string; seniorId: string; acknowledged?: boolean; [key: string]: unknown }
 
-export default async function handler(request: Request): Promise<Response> {
-  const env = envFromProcess();
+export async function handleCases(request: Request, env: CalleEnv): Promise<Response> {
   const operator = await authenticateOperator(request, env);
   if (!operator) return json({ error: "invalid_operator_session" }, 401);
   const store = storeFor(env);
@@ -21,6 +20,7 @@ export default async function handler(request: Request): Promise<Response> {
   }
 
   if (request.method === "PATCH") {
+    if (!operatorCanMutate(operator)) return json({ error: "role_not_permitted" }, 403);
     let body: { case_id?: string; acknowledged?: boolean };
     try { body = await request.json() as typeof body; } catch { return json({ error: "invalid_json" }, 400); }
     if (!body.case_id || body.acknowledged !== true) return json({ error: "invalid_case_update" }, 400);
@@ -33,4 +33,8 @@ export default async function handler(request: Request): Promise<Response> {
   }
 
   return json({ error: "method_not_allowed" }, 405);
+}
+
+export default function handler(request: Request): Promise<Response> {
+  return handleCases(request, envFromProcess());
 }

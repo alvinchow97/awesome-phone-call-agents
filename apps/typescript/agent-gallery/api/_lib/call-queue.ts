@@ -49,6 +49,14 @@ export interface QueueRuntimeEnv extends CalleEnv {
 }
 
 const JOB_TTL = 365 * 24 * 60 * 60;
+/**
+ * How late a scheduled occurrence may still be dispatched. Past this, a
+ * delayed QStash delivery or a reconciliation retry must not dial just
+ * because the senior's call window still happens to be open; the job goes to
+ * review instead. Shared by dispatchJob and reconcileDueSchedules so a
+ * scheduled call has exactly one lateness policy, not one per code path.
+ */
+const MISSED_OCCURRENCE_GRACE_MS = 15 * 60_000;
 const ACTIVE_LEASE_TTL = 2 * 60 * 60;
 const ACTIVE_LEASE_KEY = "carecall:queue:active";
 const READY_INDEX = "carecall:queue:ready";
@@ -192,9 +200,10 @@ export async function enqueueScheduledOccurrence(schedule: CareSchedule, env: Qu
 }
 
 export async function handleEnqueueCareCall(request: Request, env: QueueRuntimeEnv): Promise<Response> {
-  const { authenticateOperator, operatorCanAccessSenior } = await import("./operator-auth");
+  const { authenticateOperator, operatorCanAccessSenior, operatorCanMutate } = await import("./operator-auth");
   const operator = await authenticateOperator(request, env);
   if (!operator) return json({ error: "invalid_operator_session" }, 401);
+  if (!operatorCanMutate(operator)) return json({ error: "role_not_permitted" }, 403);
   const rawBody = await request.text();
   if (rawBody.length > 64 * 1024) return json({ error: "request_too_large" }, 413);
   let payload: CareCallRequest;
@@ -302,12 +311,20 @@ async function dispatchJob(job: CareCallJob, env: QueueRuntimeEnv): Promise<void
     return;
   }
   if (job.state !== "queued" || Date.parse(job.scheduled_for) > Date.now()) return;
+  // A delayed QStash delivery or a reconciliation retry must not dial hours
+  // late just because the call window happens to still be open then; a
+  // schedule occurrence past its grace window goes to review like a missed
+  // occurrence reconcileDueSchedules would have caught. Checked before the
+  // lease claim so a doomed job never holds the single active-call lease.
+  // Manual jobs have their own tighter 30-minute authorization_expires_at
+  // cutoff below, so this only applies to schedule-sourced jobs.
+  if (job.schedule_id && Date.now() - Date.parse(job.scheduled_for) > MISSED_OCCURRENCE_GRACE_MS) {
+    await markNeedsReview(job, env, "scheduled_occurrence_missed");
+    await wakeNextReady(env);
+    return;
+  }
   const lease = { job_id: job.id };
   if (!await store.claim(ACTIVE_LEASE_KEY, lease, ACTIVE_LEASE_TTL)) return;
-  // job reflects exactly what processQueueMessage read, with no write in
-  // between: the two "queued"-gated early returns above always exit first.
-  // compareAndSet fails if a concurrent cancellation already moved this job
-  // off "queued", so a cancelled call is never picked back up and dialed.
   // job reflects exactly what processQueueMessage read, with no write in
   // between: the two "queued"-gated early returns above always exit first.
   // compareAndSet fails if a concurrent cancellation already moved this job
@@ -601,9 +618,10 @@ export async function handleGetCareCallJob(request: Request, id: string, env: Qu
 }
 
 export async function handleCancelCareCallJob(request: Request, id: string, env: QueueRuntimeEnv): Promise<Response> {
-  const { authenticateOperator, operatorCanAccessSenior } = await import("./operator-auth");
+  const { authenticateOperator, operatorCanAccessSenior, operatorCanMutate } = await import("./operator-auth");
   const operator = await authenticateOperator(request, env);
   if (!operator) return json({ error: "invalid_operator_session" }, 401);
+  if (!operatorCanMutate(operator)) return json({ error: "role_not_permitted" }, 403);
   const store = storeFor(env);
   if (!store) return json({ error: "queue_not_configured" }, 503);
   const job = await store.get<CareCallJob>(jobKey(id));
@@ -680,7 +698,7 @@ export async function reconcileDueSchedules(env: QueueRuntimeEnv, now = new Date
       results.push({ schedule_id: id, state: "next_occurrence_repaired" });
       continue;
     }
-    if (job.state === "queued" && now.getTime() - Date.parse(job.scheduled_for) <= 15 * 60_000) {
+    if (job.state === "queued" && now.getTime() - Date.parse(job.scheduled_for) <= MISSED_OCCURRENCE_GRACE_MS) {
       await publishQueueWake(env, { type: "dispatch", job_id: job.id });
       results.push({ schedule_id: id, state: "dispatch_requeued" });
       continue;
