@@ -1,0 +1,132 @@
+export interface DurableStore {
+  get<T>(key: string): Promise<T | null>;
+  set<T>(key: string, value: T, ttlSeconds?: number): Promise<void>;
+  delete(key: string): Promise<void>;
+  claim<T>(key: string, value: T, ttlSeconds: number): Promise<boolean>;
+  refreshClaim<T>(key: string, expectedValue: T, ttlSeconds: number): Promise<boolean>;
+  releaseClaim<T>(key: string, expectedValue: T): Promise<boolean>;
+  /**
+   * Atomically replace a value that already exists, but only if it still
+   * equals `expected`. A plain read-then-set on a record with concurrent
+   * writers (a job a worker is dispatching while an operator cancels it, for
+   * example) can silently overwrite a transition made in between; this makes
+   * the writer's own stale read fail instead of winning by accident.
+   */
+  compareAndSet<T>(key: string, expected: T, next: T, ttlSeconds: number): Promise<boolean>;
+  increment(key: string, ttlSeconds: number): Promise<number>;
+  addToIndex(key: string, score: number, member: string): Promise<void>;
+  readIndex(key: string, limit?: number): Promise<string[]>;
+  readDueIndex(key: string, maximumScore: number, limit?: number): Promise<string[]>;
+  removeFromIndex(key: string, member: string): Promise<void>;
+}
+
+interface RedisResult<T = unknown> { result?: T; error?: string }
+
+export function createRedisRestStore(url: string, token: string, fetcher: typeof fetch = fetch): DurableStore {
+  const endpoint = url.replace(/\/$/, "");
+  async function command<T>(args: Array<string | number>): Promise<T> {
+    const response = await fetcher(endpoint, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(args),
+    });
+    const payload = await response.json() as RedisResult<T>;
+    if (!response.ok || payload.error) throw new Error("Durable store command failed.");
+    return payload.result as T;
+  }
+  return {
+    async get<T>(key: string) {
+      const value = await command<string | null>(["GET", key]);
+      return value === null ? null : JSON.parse(value) as T;
+    },
+    async set<T>(key: string, value: T, ttlSeconds?: number) {
+      await command(["SET", key, JSON.stringify(value), ...(ttlSeconds ? ["EX", ttlSeconds] : [])]);
+    },
+    async delete(key: string) { await command(["DEL", key]); },
+    async claim<T>(key: string, value: T, ttlSeconds: number) {
+      return await command<string | null>(["SET", key, JSON.stringify(value), "NX", "EX", ttlSeconds]) === "OK";
+    },
+    async releaseClaim<T>(key: string, expectedValue: T) {
+      const script = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
+      return Number(await command<number>(["EVAL", script, 1, key, JSON.stringify(expectedValue)])) === 1;
+    },
+    async refreshClaim<T>(key: string, expectedValue: T, ttlSeconds: number) {
+      const script = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end";
+      return Number(await command<number>(["EVAL", script, 1, key, JSON.stringify(expectedValue), ttlSeconds])) === 1;
+    },
+    async compareAndSet<T>(key: string, expected: T, next: T, ttlSeconds: number) {
+      const script = "if redis.call('get',KEYS[1])==ARGV[1] then redis.call('set',KEYS[1],ARGV[2],'EX',ARGV[3]) return 1 else return 0 end";
+      return Number(await command<number>(["EVAL", script, 1, key, JSON.stringify(expected), JSON.stringify(next), ttlSeconds])) === 1;
+    },
+    async increment(key: string, ttlSeconds: number) {
+      const response = await fetcher(`${endpoint}/multi-exec`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify([["INCR", key], ["EXPIRE", key, ttlSeconds]]),
+      });
+      const payload = await response.json() as RedisResult<number>[];
+      if (!response.ok || !Array.isArray(payload) || payload[0]?.error) throw new Error("Durable counter failed.");
+      return Number(payload[0].result);
+    },
+    async addToIndex(key: string, score: number, member: string) {
+      await command(["ZADD", key, score, member]);
+    },
+    async readIndex(key: string, limit = 100) {
+      return await command<string[]>(["ZREVRANGE", key, 0, Math.max(0, limit - 1)]);
+    },
+    async readDueIndex(key: string, maximumScore: number, limit = 20) {
+      return await command<string[]>(["ZRANGEBYSCORE", key, "-inf", maximumScore, "LIMIT", 0, limit]);
+    },
+    async removeFromIndex(key: string, member: string) { await command(["ZREM", key, member]); },
+  };
+}
+
+export class MemoryDurableStore implements DurableStore {
+  private values = new Map<string, unknown>();
+  private counters = new Map<string, number>();
+  private indexes = new Map<string, Map<string, number>>();
+  // The real store round-trips every value through JSON over HTTP, so two
+  // reads of the same key are always independent objects. Storing raw
+  // references here instead would let a caller's in-place mutation of a
+  // "before" snapshot silently corrupt the "current" stored value ahead of
+  // any actual write, which breaks compareAndSet's premise that the two are
+  // genuinely independent.
+  async get<T>(key: string) { return this.values.has(key) ? structuredClone(this.values.get(key)) as T : null; }
+  async set<T>(key: string, value: T, _ttlSeconds?: number) { this.values.set(key, structuredClone(value)); }
+  async delete(key: string) { this.values.delete(key); }
+  async claim<T>(key: string, value: T, _ttlSeconds?: number) {
+    if (this.values.has(key)) return false;
+    this.values.set(key, structuredClone(value));
+    return true;
+  }
+  async releaseClaim<T>(key: string, expectedValue: T) {
+    if (JSON.stringify(this.values.get(key)) !== JSON.stringify(expectedValue)) return false;
+    this.values.delete(key);
+    return true;
+  }
+  async refreshClaim<T>(key: string, expectedValue: T, _ttlSeconds: number) {
+    return JSON.stringify(this.values.get(key)) === JSON.stringify(expectedValue);
+  }
+  async compareAndSet<T>(key: string, expected: T, next: T, _ttlSeconds?: number) {
+    if (JSON.stringify(this.values.get(key)) !== JSON.stringify(expected)) return false;
+    this.values.set(key, structuredClone(next));
+    return true;
+  }
+  async increment(key: string, _ttlSeconds?: number) {
+    const next = (this.counters.get(key) ?? 0) + 1;
+    this.counters.set(key, next);
+    return next;
+  }
+  async addToIndex(key: string, score: number, member: string) {
+    const index = this.indexes.get(key) ?? new Map<string, number>();
+    index.set(member, score);
+    this.indexes.set(key, index);
+  }
+  async readIndex(key: string, limit = 100) {
+    return [...(this.indexes.get(key) ?? new Map()).entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([member]) => member);
+  }
+  async readDueIndex(key: string, maximumScore: number, limit = 20) {
+    return [...(this.indexes.get(key) ?? new Map()).entries()].filter(([, score]) => score <= maximumScore).sort((a, b) => a[1] - b[1]).slice(0, limit).map(([member]) => member);
+  }
+  async removeFromIndex(key: string, member: string) { this.indexes.get(key)?.delete(member); }
+}

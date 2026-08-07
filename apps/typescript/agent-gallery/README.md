@@ -1,260 +1,226 @@
-# Agent Gallery — Appointment Recovery
+# CareCall SG
 
-Recover a missed or unconfirmed appointment through one safe, policy-constrained
-CALL-E phone call, and get back a structured disposition with a concrete next
-action instead of a raw transcript.
+CareCall SG is a Singapore-focused care companion calling workspace for caregiver-authorized reminders and check-ins, self-reported outcomes, and human escalation.
 
-Appointment Recovery is the first workflow in a planned family of reusable,
-safety-contracted phone workflows. The product specification lives at
-[`docs/agent-gallery/product-spec.md`](../../../docs/agent-gallery/product-spec.md).
+> CareCall reminds seniors about approved everyday routines, records what they report, and directs exceptions to a human. It does not provide medical advice, verify adherence, dispatch emergency services, or replace human care.
 
-## Status
+The product and UI implementation source of truth is [`docs/agent-gallery/carecall-sg-ui-plan.md`](../../../docs/agent-gallery/carecall-sg-ui-plan.md).
 
-Deployed and publicly reachable at
-<https://awesome-phone-call-agents.vercel.app>.
+## Current status
 
-The offline flow (configure → validate → masked dry-run preview → authorization
-gate) works end to end, outcome classification is implemented and tested, and
-the CALL-E MCP client is written and covered against a fake server. The live
-call layer is deployed, its credentials are configured, and the access gate in
-front of it is verified against the running deployment.
+The CareCall single-call and controlled-recurrence foundation is implemented:
 
-It has not yet been exercised against the live CALL-E service from that
-deployment. Until one real call has been placed through the deployed UI, treat
-the deployed call path as unproven: passing offline tests and configured
-environment variables do not establish that the edge runtime completes the MCP
-handshake, that the deployed token is accepted, or that polling handles real
-production responses.
+- responsive desktop and mobile navigation
+- Today dashboard and care timeline
+- fictional Singapore senior profiles
+- medication, meal, hydration, wellbeing, and appointment care routines, each with its own outcome vocabulary and stated boundary
+- an operator routine builder with a live trust-first opening and conversation-plan preview
+- visible durable pause, resume, and cancellation controls
+- exception-only Needs Attention workspace
+- Singapore timezone, call-window, privacy, and safety settings
+- masked phone numbers
+- dry-run call preview with trust-first opening and explicit safety boundaries
+- separate authorization for exactly one real call
+- CareCall-specific per-kind request validation
+- trust-first CALL-E goals with medical, emergency, and anti-scam boundaries
+- live provider-status polling and conservative structured outcomes
+- operational urgency (`contact now`, `follow up today`, or `review`)
+- safety flags for possible immediate danger, medical advice, sensitive-data requests, and unconfirmed dispatch claims
+- session routing of live exceptions into Needs Attention
+- signed, expiring operator sessions with senior-scoped authorization
+- durable request claims, daily spending limits, call ownership, outcomes, attention cases, and audit events
+- caregiver-authorized daily or weekday schedules with an explicit review date
+- encrypted scheduled phone numbers, dated call exceptions, and terminal cancellation that removes the ciphertext
+- one durable queue for manual and scheduled calls, with a single active-call lease and cancellable queued jobs
+- a protected Calls console for queue position, active state, provider timing, duration, history, and review cases
+- signed QStash delivery for exact-time wake-ups and background provider-status monitoring
+- a once-daily host reconciliation cron that repairs state but never initiates late calls
+- stable occurrence keys, no blind call retries, and fail-closed human review
+- English-only live-call enforcement until other languages are verified
+- accessible focus, reduced-motion, reduced-transparency, high-contrast, and dark-mode behavior
 
-The integration surface was confirmed against one real call placed through the
-`calle` CLI rather than through this app; see
-[`calle-api-observations.md`](../../../docs/agent-gallery/calle-api-observations.md).
+The interface uses fictional demo data and says so visibly. Settings changes remain session-only demonstrations. When the durable operations environment is configured, live-call ownership, snapshots, outcomes, attention cases, acknowledgements, limits, audits, and recurring schedules are stored server-side. The full phone number is entered only at a one-call or recurring authorization gate; call snapshots retain only a masked suffix, while active recurring schedules retain an encrypted phone number until cancellation.
 
-## Architecture and reuse
+The CareCall path is implemented but has not yet been verified with a consenting recipient through the deployed interface. Do not represent it as operationally proven until that opt-in verification is complete.
 
-The code is split so that the CALL-E integration can be lifted into a different
-workflow without carrying appointment concepts with it.
+## Product boundary
 
-```text
-api/                                deployment surface
-├── _lib/calls.ts                   handlers on web-standard Request/Response
-└── calls/                          thin Vercel Edge route files
+CareCall may:
 
-src/calle/                          reusable, workflow-agnostic
-├── client.ts                       MCP transport: plan_call, run_call, get_call_run
-├── status.ts                       run-status semantics and delivery classification
-└── mask.ts                         phone-number masking
+- repeat a caregiver-approved reminder
+- ask one clear follow-up question at a time
+- record only self-reported outcomes from the routine kind's own vocabulary
+- ask whether food is available or a planned delivery arrived
+- offer a callback from an authorized caregiver
+- route ambiguity, uncertainty, and requests for help to a human
 
-src/workflows/appointment-recovery/ this workflow only
-├── workflow.ts                     policy lists and the call goal
-├── types.ts                        request, result, and outcome contracts
-├── validate.ts                     input rules
-├── agreement.ts                    reads what an answered call agreed to
-├── outcome.ts                      delivery and agreement to business outcome
-└── result.ts                       operator-facing result
-```
+CareCall must never:
 
-`src/calle/` may not import from `src/workflows/`, and it does not name any
-appointment concept. Both rules are enforced by `test/layering.test.ts` rather
-than left to good intentions, because the dependency inverts quietly the first
-time the adapter needs a domain constant.
+- diagnose a condition or recommend a dose
+- advise a senior to repeat, skip, delay, or change medication
+- treat silence or hesitation as completion
+- request money, banking information, OTPs, passwords, or full NRIC
+- create a hidden recurring schedule
+- claim that emergency help or a caregiver has been dispatched when it has not
 
-The split falls where knowledge actually differs. Which statuses are terminal,
-and the fact that a telephony `DECLINED` is a rejected call rather than a person
-saying no, are things every CALL-E workflow must get right, so they live in the
-adapter. Whether a given call recovered an appointment is only meaningful here.
+For an immediate emergency in Singapore, the interface states that a person should contact **995**. CareCall itself does not dispatch emergency services.
 
-A second workflow would supply its own goal text, input contract, and reading of
-what the call agreed to, and reuse the adapter unchanged. It would not get a
-gallery UI for free: the screens are written against this workflow's contract.
-
-## The problem and workflow boundary
-
-Missed and unconfirmed appointments cost service businesses (the reference
-vertical is hair and beauty salons) chair time and revenue, and recovering them
-means staff re-dialing customers by hand. This app places exactly one outbound
-recovery call per explicit authorization. It does not do bulk calling,
-recurrence, SMS sending, or calendar writes; it recommends the next action and a
-person performs it.
-
-The agent may only confirm the original slot, offer the operator-entered
-replacement windows (maximum three), book one of them, note a requested SMS
-confirmation, or accept a decline. It may never change prices, discuss other
-customers, give regulated advice, promise anything outside the windows, or call
-back on its own. Silence and ambiguity are never treated as agreement.
-
-## Setup and usage
+## Setup
 
 ```bash
 npm install
-npm run dev        # local UI at the Vite dev URL
-npm run verify     # typecheck + tests + build
+npm run dev
+npm run verify
 ```
 
-Deploy with `npm run deploy` (Vercel). The API routes under `api/` run on
-Vercel's Edge runtime, but the handlers themselves take and return web-standard
-`Request` and `Response`, so moving to another host means replacing two thin
-route files rather than rewriting the integration.
+Default tests are offline, require no credentials, and place no calls.
 
-## Credentials and their boundary
+## Durable operations configuration
 
-CALL-E credentials are supplied only as Vercel environment variables
-(`CALLE_ACCESS_TOKEN`, `CALLE_SERVER_URL`) read by the handlers in `api/_lib/`.
-No credential is ever bundled into browser code, committed, or pasted into chat.
-Set the token so its value never appears in a shell argument or history:
+CareCall live calls fail closed unless both operator identity and durable storage are configured. Every server entry point that can place a call or reveal what a call said requires a signed operator session scoped to the senior being called; there is no unauthenticated path.
 
-```bash
-npx vercel env add CALLE_ACCESS_TOKEN production
+Required CareCall environment variables:
+
+```text
+CARECALL_SESSION_SECRET=<at least 32 random characters>
+CARECALL_OPERATORS_JSON=[{"id":"mei-chen","name":"Mei Chen","role":"coordinator","access_code_sha256":"<sha256 hex>","senior_ids":["mdm-lim"]}]
+UPSTASH_REDIS_REST_URL=<server-side Redis REST URL>
+UPSTASH_REDIS_REST_TOKEN=<server-side standard token>
+CARECALL_MAX_CALLS_PER_DAY=20
+CARECALL_DATA_ENCRYPTION_KEY=<at least 32 random characters, stored server-side>
+CRON_SECRET=<high-entropy scheduler bearer secret>
+CARECALL_PUBLIC_BASE_URL=https://<production-host>
+QSTASH_TOKEN=<server-side QStash publishing token>
+QSTASH_URL=https://qstash-us-east-1.upstash.io
+QSTASH_CURRENT_SIGNING_KEY=<QStash current signing key>
+QSTASH_NEXT_SIGNING_KEY=<QStash next signing key>
 ```
 
-The `confirm_token` that authorizes one call is also server-only: it is created,
-spent, and discarded inside a single request and never sent to the browser.
-Local live testing uses an untracked `.env.local`.
+Operator codes are stored only as SHA-256 hashes in the JSON configuration. Sessions are HMAC-signed, expire after 30 minutes, and are checked against the current operator configuration on every protected request. Redis, QStash, data-encryption, and scheduler credentials must remain server-side.
 
-## Who may place a call
+See the [CareCall environment variable reference](../../../docs/agent-gallery/carecall-environment-variables.md) for each variable's consumer, safe setup method, renewal trigger, and rotation procedure. It deliberately contains no deployment values.
 
-A third environment variable, `OPERATOR_ACCESS_CODE`, is required before this
-deployment will place or inspect a call:
+## Queue and recurring schedule operation
 
-```bash
-npx vercel env add OPERATOR_ACCESS_CODE production
+Manual and recurring authorizations both create encrypted durable call jobs. QStash delivers a signed, minimal message containing only the job ID to `/api/carecall/worker`; the worker verifies both current and next signing keys before reading the protected job from Redis. Set `QSTASH_URL` to the origin for the same region that issued the token and signing keys; the US origin is `https://qstash-us-east-1.upstash.io`, while omitting the variable uses the SDK's EU default.
+
+The queue permits one ongoing CareCall at a time. If the active lease is occupied, later calls remain queued. Manual authorization expires after 30 minutes rather than waiting indefinitely. When provider status becomes terminal, a delayed status message records the conservative outcome, releases the lease, and wakes the next job. Delivery retries cannot create another phone call because the call request still passes through the durable request claim.
+
+The Calls destination reads a protected, senior-scoped operational list that refreshes every five seconds. It shows waiting, active, completed, cancelled, and needs-review records with provider timing when available. Provider duration is preferred; an observed start-to-completion duration is identified as a fallback. Full phone numbers, encrypted phone data, access codes, caregiver instructions, and transcripts are never returned by the list endpoint or rendered in the console.
+
+Each record links to the care routine that produced the call, opening the same routine plan the Today and Needs Attention destinations open. The record keeps the routine title recorded at call time, so a later rename does not rewrite history, while the link resolves the routine as it stands now. A record whose routine or senior is no longer in the care directory stays plain text and says so rather than opening a plan that cannot be rebuilt.
+
+Immediately before dialing, the worker rechecks:
+
+1. operator and senior scope
+2. recurring schedule status and review period
+3. the senior's permitted Singapore call window
+4. daily spending and durable idempotency limits
+5. cancellation and the stable occurrence key
+
+The Hobby-compatible Vercel cron in `vercel.json` runs once daily and invokes `/api/carecall/scheduler` with `CRON_SECRET`. It is a reconciliation safety net only: it repairs missing status checks, identifies missing jobs, expires reviews, and sends missed occurrences to human review. It never places a late call. Exact-time execution comes from QStash delayed delivery rather than the daily cron.
+
+Before a controlled pilot, run the protected configuration and operations preflight from a trusted terminal. It reads no secret values and places no call:
+
+```sh
+npm run preflight
 ```
 
-The browser's authorization checkbox records the operator's consent, but it is a
-value in a request body and anyone can send one, so it is not a security
-boundary. Both call endpoints therefore require the access code in an
-`x-access-code` header and compare it on the server, in constant time, against
-the environment variable.
+Set `CARECALL_PUBLIC_BASE_URL` and `CRON_SECRET` in the terminal environment using the same secret source as the deployment. The response reports configuration booleans plus PII-free queue depth, active-call state, queue age, review counts, grouped reasons, and operational alerts. See the [pilot runbook](../../../docs/agent-gallery/carecall-pilot-runbook.md) for the acceptance matrix, accessibility gate, controlled-call procedure, and stop conditions, and the [Phase 6 verification record](../../../docs/agent-gallery/carecall-phase6-verification.md) for completed local evidence and remaining credentialed checks.
 
-The gate fails closed. A deployment with no configured code cannot place calls
-at all, and reports the same `not_configured` error as a deployment with no
-CALL-E credentials, so an unauthenticated caller cannot learn which part of the
-configuration is absent. It runs before the request body is read, so an
-unauthorized caller cannot use the endpoint as a free validator.
+An expired review date, revoked operator, invalid encrypted record, missed occurrence, or failed call start moves the job and schedule to `needs_review`. Queued manual calls can be cancelled before they start. Schedule pause invalidates its queued occurrence; cancellation also removes stored phone ciphertext and requires new authorization. An ongoing provider call cannot be recalled.
 
-The status endpoint is gated on the same code, because a run's activity and
-transcript are the contents of a real conversation with a real person.
+## Senior records
 
-Dry run reaches no endpoint, so a reviewer can explore the entire workflow —
-configure, validate, masked preview, the safety contract — without a code. Only
-leaving dry-run mode needs one.
+An operator can edit a senior's name, preferred name, language, permitted call window, and caregiver details from the care directory, and can withdraw a senior from care calls.
 
-## Dry-run and preview behavior
+The permitted call window is chosen as two times rather than typed. The editor holds 24-hour values, composes the 12-hour window the workflow parses, and shows the stored result while editing. An unreadable window is treated as outside every window, so a typed typo would silently stop that senior's reminders instead of failing visibly; the composed window is checked against the workflow's own parser before it is stored, and a window running past midnight is flagged because it permits overnight calls.
 
-Dry run is the default and is the entire flow until the final gate. The preview
-screen shows the complete call plan — masked recipient number, business context,
-offered windows, and the agent's may/may-never lists — without any network call.
+Language and caregiver relationship are chosen from lists covering Singapore's official languages, the dialects seniors commonly prefer, and the usual caregiver relationships. Both offer `Other…` with a remark, and a stored value outside the list reopens as `Other…` with its remark rather than being lost.
 
-## Real-world side effects
+The phone number is not editable. The record holds only a masked number, and the E.164 number is supplied by an authorized operator at the moment a call is authorized.
 
-Exactly one outbound phone call, and only after the operator supplies a valid
-access code, checks an explicit "I authorize exactly one call to this number,
-now" box, and presses the button, which disables immediately.
+Withdrawal is a state change rather than a deletion. A withdrawn senior keeps their call history and open care cases, so past records keep their subject, while every path that can dial is closed: routines stop being scheduled, the preview becomes read-only, and neither one-call authorization nor schedule activation is offered. Withdrawal cannot recall a call the provider has already accepted. A withdrawn senior can be restored, after which routines must still be resumed individually.
 
-A duplicate submission with the same `request_key` returns the already-created
-call instead of dialing again **when it reaches the same server isolate**. That
-covers a double-click, which is the realistic case. It is not a durable
-guarantee; see the duplicate-guard limitation below for what it does not
-cover.
+These records are demo-session state. There is no durable senior store; edits are not persisted, and nothing is sent to the server.
 
-## Input and output contracts
+## Care routines
 
-See [`types.ts`](src/workflows/appointment-recovery/types.ts). Input: business (name, IANA timezone, E.164
-callback number), customer (given name, E.164 phone, consent attestation),
-appointment (service, ISO 8601 original time, missed/unconfirmed status), and up
-to three future replacement windows, plus a client-generated `request_key`.
-Output: one of eight terminal outcomes (`confirmed`, `rescheduled`,
-`no_agreement`, `declined`, `unreachable`, `failed`, `timed_out`, `uncertain`),
-an optional agreed time, customer intent, notes, the CALL-E call id, and a
-mapped next action.
+An operator can write a care routine from Care Routines or from a senior's profile. A routine describes a call; it is created paused and places nothing until a schedule or a single call is separately authorized.
 
-Outcomes are derived in
-[`outcome.ts`](src/workflows/appointment-recovery/outcome.ts) from the
-call's terminal status and a conservative reading of the conversation produced
-by [`agreement.ts`](src/workflows/appointment-recovery/agreement.ts). That reader treats the
-summary and transcript as untrusted text, requires positive evidence for every
-conclusion, and returns "inconclusive" when signals conflict or when an
-acceptance names no offered window, so ambiguity reaches a human. CALL-E's
-`task_completed` is deliberately never used as the business outcome: it reports
-that the call ended cleanly, including calls that recovered nothing. CALL-E's
-telephony `DECLINED` means a rejected incoming call and maps to `unreachable`,
-not to a customer refusing the offer.
+Five kinds are supported: medication, meal, hydration, wellbeing, and appointment. Each kind carries its own permitted outcome vocabulary, its own conversation plan, and its own stated boundary. The vocabularies are keyed by kind in `src/workflows/carecall/result.ts`, so a kind added without one is a type error rather than a kind that silently inherits another's outcomes and reports a result the call never established. A wellbeing check-in records only what the senior chose to say — CareCall does not assess mood, screen for any condition, or interpret what it hears — and an appointment reminder repeats only caregiver-confirmed details without booking, moving, or cancelling anything.
 
-Call transcripts and structured results are untrusted external data. The UI
-renders them as plain text and never executes or obeys anything inside them.
+The trust-first opening and the four-step conversation plan are derived from the kind rather than authored per routine, so the preview an operator reads always describes what the agent is actually instructed to do. The parts an operator writes — the caregiver-approved wording and the trust phrase — are the parts that reach the provider.
 
-## Cancellation, rollback, and cleanup
+The builder refuses a call time outside the senior's permitted window when the routine is written. The worker would otherwise send that occurrence to human review, which is safe but silent, leaving the operator with no idea why the reminder never went out.
 
-The flow creates no recurring jobs and stores nothing server-side, so there is
-nothing to clean up after a run. Before the authorization gate, closing the tab
-abandons the draft. Once a call is placed it cannot be recalled; the operator
-follows the recommended next action, and an `uncertain` outcome always routes to
-human review before anything else happens.
+A later pass could draft the opening and plan from the senior's care record, past outcomes, and an organisation's approved phrasing library, retrieved with RAG and composed through an AI API, so an operator reviews a proposed plan instead of writing one. That is recorded in the builder as a planned enhancement and is not implemented. Any such draft would remain a suggestion: the caregiver-approved wording, the kind's fixed boundary, and the separate authorization step would still gate every call.
 
-## Data and log storage
+## Safety policy
 
-No database. CALL-E is the system of record for call state; the browser polls a
-server endpoint that relays CALL-E's own status. Results exist only in CALL-E
-and the operator's browser session. The server function logs nothing beyond
-Vercel's standard request handling and never logs phone numbers.
+The safety policy is readable in the workspace from Care Routines and from Settings, rather than living only in this file.
 
-## Tests and verification
+Its per-kind boundaries, permitted outcomes, review flags, and urgency levels are read from the code that enforces them. The kind boundaries come from `src/carecall/routine-kinds.ts`, the permitted outcomes from the vocabularies in `src/workflows/carecall/result.ts`, and the flag and urgency descriptions from `src/workflows/carecall/safety.ts`, beside the patterns that raise them. Only the standing may/never rules are written as prose, and `test/safety-policy.test.ts` fails if any derived section drifts from what the workflow applies or if a flag reaches an operator without a stated meaning and response.
 
-```bash
-npm test
+Safety flags are shown by name and consequence wherever they appear, rather than as bare identifiers. A flag records that wording appeared in a call; it does not establish who said it or that it is true, and any flag other than possible immediate danger forces the outcome to uncertain.
+
+## UI structure
+
+```text
+src/
+├── App.tsx                    responsive CareCall application shell
+├── carecall/
+│   ├── fixtures.ts           fictional Singapore care records
+│   ├── call-operations.ts    call-list contracts and state/time presentation
+│   ├── routine-kinds.ts      per-kind icon, purpose, plan, and stated boundary
+│   ├── safety-policy.ts      operator-facing policy assembled from the enforcing code
+│   ├── routine-directory.ts  routine drafting, validation, and creation rules
+│   ├── routine-directory-context.tsx demo-session routine state shared by screens
+│   ├── senior-directory.ts   senior edit, withdrawal, and callability rules
+│   ├── senior-directory-context.tsx demo-session senior state shared by screens
+│   └── types.ts              UI-domain contracts
+├── components/
+│   ├── CallPreviewSheet.tsx  masked, no-side-effect dry-run preview
+│   ├── CareCallExecutionSheet.tsx authorization, live polling, and result
+│   ├── ScheduleActivationSheet.tsx explicit recurring authorization
+│   ├── RoutineBuilderSheet.tsx kind picker with live opening and plan preview
+│   ├── SafetyPolicySheet.tsx readable policy with boundaries, flags, and urgency
+│   ├── SeniorEditSheet.tsx   validated senior record editing
+│   ├── SeniorWithdrawSheet.tsx confirmed withdrawal with stated impact
+│   ├── CarePrimitives.tsx    status, avatar, and routine components
+│   └── Icon.tsx              dependency-free interface icons
+├── screens-care/
+│   ├── Today.tsx
+│   ├── Seniors.tsx           care directory with record editing and withdrawal
+│   ├── CareRoutines.tsx
+│   ├── Calls.tsx             protected queue, active-call, and history console
+│   ├── NeedsAttention.tsx
+│   └── Settings.tsx
+└── styles.css                semantic, adaptive utility design system
 ```
 
-Tests cover E.164 and timezone validation, consent and window rules, number
-masking, outcome classification, the MCP client against an in-process fake
-CALL-E server, and the layering boundary described above. Two are regression
-tests for defects that reached working code: CALL-E reporting
-`task_completed: true` at high confidence on a call that rebooked nothing, and
-classifying a result without the offered windows, which downgraded every
-successful reschedule to `uncertain`.
+CareCall is the only workflow. The reusable `src/calle/` adapter imports no workflow-specific code and may not even name a workflow domain concept; the layering rule is enforced by `test/layering.test.ts`.
 
-Tests run offline with no credentials and place no calls. `npm run verify` adds
-the typecheck and production build.
+## Next implementation milestone
 
-## Opt-in live calls
+Phase 5B queue hardening, Phase 6A automated pilot safeguards, and Phase 6A.2 operational visibility are implemented. Credentialed Phase 6B staging and consenting live-call verification remain:
 
-Live calling is available on a deployment that has `CALLE_ACCESS_TOKEN`,
-`CALLE_SERVER_URL`, and `OPERATOR_ACCESS_CODE` set. It requires all three, plus
-the per-call authorization gate in the browser. Without them the app remains
-fully usable in dry-run form and the call endpoints answer `503 not_configured`.
+1. Repeat the queue acceptance matrix against deployed Redis/QStash and verify each transition in the Calls console.
+2. Verify one consenting end-to-end English call from the deployed interface with durable operations configured.
+3. Run controlled recurring-call acceptance tests covering pause, cancellation, review expiry, host overlap, and provider failure.
+4. Add organisation-managed operator provisioning, credential rotation, schedule listings, and encryption-key rotation instead of environment JSON.
 
-Tests never place calls and never need credentials.
+## Credentials and live-call safety
 
-## Current limitations
+The existing API routes read CALL-E credentials only from server-side environment variables. Tokens and confirmation values must never enter browser bundles, repository files, screenshots, transcripts, or chat.
 
-- The CALL-E client has been verified against a fake server, not yet against the
-  live service from a deployment.
-- The duplicate guard holds request keys in one server isolate. Planning and
-  running happen in a single request, so a repeat submission would mint a fresh
-  single-use token and dial again; the guard plus the disabled submit control
-  covers a double-click, not a determined retry across cold starts. It also
-  records the run only after dialing, so two concurrent requests with the same
-  key can both pass the initial lookup. An atomic durable claim is the only
-  complete answer.
-- There is no rate limit. The access code is the only control on how many calls
-  an authorized operator can place, so a leaked code is a spending risk until it
-  is rotated. A per-isolate limiter would not meaningfully limit anything, for
-  the same reason the duplicate guard does not.
-- The agreement reader matches phrasing rather than understanding language. It
-  handles negation, split sentences, and the common ways a time is spoken, but
-  wording it does not recognize reads as inconclusive, which sends a correctly
-  handled call to human review as `uncertain`. It errs toward review rather than
-  toward a wrong booking.
-- An acceptance is only tied to a window when the sentence names both the day
-  and the time. An agent that says only "confirmed for 3 PM" with two windows
-  offered stays inconclusive, because guessing between them could book the
-  wrong one.
-- The call goal asks the agent to offer to confirm the original appointment for
-  both `missed` and `unconfirmed` statuses, though confirming an appointment
-  already in the past is not meaningful. The two statuses want different call
-  policies.
-- Replacement-window times are entered in the business's local time without
-  cross-checking the stated timezone. The agreement reader now reads those
-  digits as the business's own clock rather than converting them, so matching no
-  longer depends on where the operator's browser is, but nothing yet verifies
-  that the entered times are valid in the timezone the operator named.
-- Single workflow, single call, English-language conversations only.
+The live CareCall path requires:
+
+- a server-checked operator identity with senior-scoped authorization
+- an E.164 phone number, masked outside necessary input
+- explicit authority to contact the senior
+- a one-call or explicit recurring authorization gate after preview
+- immediate submit disabling and durable duplicate prevention with stable request keys
+- a shared durable call queue with one active-call lease and signed worker delivery
+- clear pause and terminal cancellation for every recurring routine
+- no credentials or live calls in default tests
