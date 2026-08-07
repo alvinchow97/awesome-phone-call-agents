@@ -19,6 +19,8 @@ export interface FakeOptions {
   statusSequence?: string[];
   /** Result payload attached once a terminal status is reached. */
   terminalResult?: Record<string, unknown>;
+  /** Override the single activity entry's kind and message, to simulate provider free text. */
+  activityEntry?: { kind: string; message: string };
 }
 
 export interface FakeCalle {
@@ -135,7 +137,13 @@ export function createFakeCalle(options: FakeOptions = {}): FakeCalle {
             run_id: "run-1",
             status,
             activity: [
-              { run_id: "run-1", ts: "2026-08-04T13:57:02.000+08:00", level: "info", kind: "call", message: `status=${status}` },
+              {
+                run_id: "run-1",
+                ts: "2026-08-04T13:57:02.000+08:00",
+                level: "info",
+                kind: options.activityEntry?.kind ?? "call",
+                message: options.activityEntry?.message ?? `status=${status}`,
+              },
             ],
             ...(terminal && options.terminalResult ? { result: options.terminalResult } : {}),
           },

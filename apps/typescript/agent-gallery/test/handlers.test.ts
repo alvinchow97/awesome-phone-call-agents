@@ -197,6 +197,22 @@ test("an in-progress run reports status and activity but no result", async () =>
   assert.equal(payload.carecall_result, undefined);
 });
 
+test("a status response never carries the provider's own activity text", async () => {
+  const env = { ...CONFIGURED, durableStore: new MemoryDurableStore() };
+  const fake = createFakeCalle({
+    statusSequence: ["PREPARING", "PREPARING"],
+    activityEntry: { kind: "transcript", message: "Senior: my number is 91234567, I fell down" },
+  });
+  await withStartedCall(env, fake, "activity-leak-check");
+  const response = await withFakeCalle(fake, async () => handleGetCallStatus(await get(env), "run-1", env));
+
+  const payload = await response.json();
+  const rawBody = JSON.stringify(payload);
+  assert.ok(!rawBody.includes("91234567"), "a phone number spoken on the call leaked into the status response");
+  assert.ok(!rawBody.includes("fell down"), "provider-authored activity text leaked into the status response");
+  assert.equal(payload.activity[0].message, "Provider sent an update.");
+});
+
 test("a status request without a run id is refused", async () => {
   const response = await handleGetCallStatus(await get(), "", CONFIGURED);
   assert.equal(response.status, 400);

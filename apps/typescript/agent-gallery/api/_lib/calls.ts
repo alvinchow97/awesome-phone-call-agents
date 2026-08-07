@@ -19,7 +19,7 @@
 //
 // See docs/agent-gallery/calle-api-observations.md.
 
-import { CalleError, createCalleClient, isTerminalStatus } from "../../src/calle";
+import { CalleError, createCalleClient, describeActivity, isTerminalStatus } from "../../src/calle";
 import type { CalleActivity, CalleRun } from "../../src/calle";
 import {
   buildCareCallResult,
@@ -247,10 +247,12 @@ export async function handleGetCallStatus(
     return calleFailure(error);
   }
 
+  // entry.message may be provider free text, including live transcript lines
+  // (docs/agent-gallery/calle-api-observations.md) — never forward it as-is.
   const activity = (run.activity ?? []).map((entry: CalleActivity) => ({
     ts: entry.ts,
     level: entry.level,
-    message: entry.message,
+    message: describeActivity(entry),
   }));
   const timing = careCallTiming(run);
 
