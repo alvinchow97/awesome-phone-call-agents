@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleCancelCareCallJob, handleEnqueueCareCall, handleListCareCallJobs, handleQueueWorker, processQueueMessage, queueOperationalSnapshot, type CareCallJob, type QueueWakeMessage } from "../api/_lib/call-queue";
-import { MemoryDurableStore } from "../api/_lib/durable-store";
+import { MemoryDurableStore, type DurableStore } from "../api/_lib/durable-store";
 import { issueOperatorSession } from "../api/_lib/operator-auth";
 import type { CareCallRequest } from "../src/workflows/carecall";
 import { FAKE_SERVER_URL, FAKE_TOKEN, createFakeCalle } from "./fake-calle-server";
@@ -97,6 +97,53 @@ test("a queued manual call can be cancelled before it starts", async () => {
   const job = await env.durableStore.get<CareCallJob>("carecall:job:job-cancel-me");
   assert.equal(job?.state, "cancelled");
   assert.equal(job?.phone_ciphertext, "");
+});
+
+test("a cancellation that lands mid-dispatch wins the race, and the provider is never called", async () => {
+  const { env } = environment();
+  await handleEnqueueCareCall(await authorizedRequest(request("race"), env), env);
+  const token = await issueOperatorSession("mei-chen", ACCESS_CODE, env);
+  assert.ok(token);
+
+  const realStore = env.durableStore;
+  let injected = false;
+  // Interpose right where the real race lives: the worker has just taken the
+  // single active-call lease but has not yet committed the queued -> starting
+  // transition. An operator's cancellation lands in exactly that gap.
+  const racingStore: DurableStore = {
+    get: realStore.get.bind(realStore),
+    set: realStore.set.bind(realStore),
+    delete: realStore.delete.bind(realStore),
+    refreshClaim: realStore.refreshClaim.bind(realStore),
+    releaseClaim: realStore.releaseClaim.bind(realStore),
+    compareAndSet: realStore.compareAndSet.bind(realStore),
+    increment: realStore.increment.bind(realStore),
+    addToIndex: realStore.addToIndex.bind(realStore),
+    readIndex: realStore.readIndex.bind(realStore),
+    readDueIndex: realStore.readDueIndex.bind(realStore),
+    removeFromIndex: realStore.removeFromIndex.bind(realStore),
+    claim: async (key, value, ttl) => {
+      const claimed = await realStore.claim(key, value, ttl);
+      if (claimed && key === "carecall:queue:active" && !injected) {
+        injected = true;
+        const cancelResponse = await handleCancelCareCallJob(
+          new Request("https://example.test/api/carecall/jobs/job-race", { method: "DELETE", headers: { authorization: `Bearer ${token}` } }),
+          "job-race",
+          { ...env, durableStore: realStore },
+        );
+        assert.equal(cancelResponse.status, 200, "the interposed cancellation itself must succeed");
+      }
+      return claimed;
+    },
+  };
+
+  const fake = createFakeCalle();
+  await withFakeCalle(() => processQueueMessage({ type: "dispatch", job_id: "job-race" }, { ...env, durableStore: racingStore }), fake);
+
+  assert.ok(injected, "the race window was never reached; this test is not exercising the race");
+  assert.equal((await realStore.get<CareCallJob>("carecall:job:job-race"))?.state, "cancelled", "the cancellation must not be overwritten by the losing dispatch");
+  assert.equal(fake.runCallAttempts, 0, "the provider must never be called for a job cancelled before dispatch committed");
+  assert.equal(await realStore.get("carecall:queue:active"), null, "the worker must release the active lease it can no longer use");
 });
 
 test("the operator call list is scoped, paginated, and excludes protected call inputs", async () => {

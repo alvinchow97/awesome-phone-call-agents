@@ -304,9 +304,21 @@ async function dispatchJob(job: CareCallJob, env: QueueRuntimeEnv): Promise<void
   if (job.state !== "queued" || Date.parse(job.scheduled_for) > Date.now()) return;
   const lease = { job_id: job.id };
   if (!await store.claim(ACTIVE_LEASE_KEY, lease, ACTIVE_LEASE_TTL)) return;
+  // job reflects exactly what processQueueMessage read, with no write in
+  // between: the two "queued"-gated early returns above always exit first.
+  // compareAndSet fails if a concurrent cancellation already moved this job
+  // off "queued", so a cancelled call is never picked back up and dialed.
+  // job reflects exactly what processQueueMessage read, with no write in
+  // between: the two "queued"-gated early returns above always exit first.
+  // compareAndSet fails if a concurrent cancellation already moved this job
+  // off "queued", so a cancelled call is never picked back up and dialed.
+  const readAtDispatch = { ...job };
   job.state = "starting";
   job.updated_at = new Date().toISOString();
-  await store.set(jobKey(job.id), job, JOB_TTL);
+  if (!await store.compareAndSet(jobKey(job.id), readAtDispatch, job, JOB_TTL)) {
+    await store.releaseClaim(ACTIVE_LEASE_KEY, lease);
+    return;
+  }
   await store.removeFromIndex(READY_INDEX, job.id);
 
   if (job.source === "manual" && (!job.authorization_expires_at || Date.parse(job.authorization_expires_at) <= Date.now())) {
@@ -598,11 +610,17 @@ export async function handleCancelCareCallJob(request: Request, id: string, env:
   if (!job) return json({ error: "job_not_found" }, 404);
   if (!operatorCanAccessSenior(operator, job.request.senior.id)) return json({ error: "senior_scope_denied" }, 403);
   if (job.state !== "queued") return json({ error: "job_already_started", message: "An ongoing provider call cannot be recalled." }, 409);
+  // The read above can already be stale by the time we write: a worker may be
+  // dispatching this same job right now. compareAndSet only commits the
+  // cancellation if the store still holds exactly what we read as "queued".
+  const readAtCancel = { ...job };
   job.state = "cancelled";
   job.phone_ciphertext = "";
   job.completed_at = new Date().toISOString();
   job.updated_at = job.completed_at;
-  await store.set(jobKey(id), job, JOB_TTL);
+  if (!await store.compareAndSet(jobKey(id), readAtCancel, job, JOB_TTL)) {
+    return json({ error: "job_already_started", message: "An ongoing provider call cannot be recalled." }, 409);
+  }
   await store.removeFromIndex(READY_INDEX, id);
   await store.removeFromIndex(REVIEW_INDEX, id);
   await auditCareCall(store, operator.id, "queued_call_cancelled", { job_id: id, source: job.source });
@@ -615,12 +633,13 @@ export async function cancelQueuedJobForSchedule(id: string | undefined, env: Qu
   if (!store) return;
   const job = await store.get<CareCallJob>(jobKey(id));
   if (!job || job.state !== "queued") return;
+  const readAtCancel = { ...job };
   job.state = "cancelled";
   job.phone_ciphertext = "";
   job.failure_reason = reason;
   job.completed_at = new Date().toISOString();
   job.updated_at = job.completed_at;
-  await store.set(jobKey(id), job, JOB_TTL);
+  if (!await store.compareAndSet(jobKey(id), readAtCancel, job, JOB_TTL)) return;
   await store.removeFromIndex(READY_INDEX, id);
 }
 

@@ -5,6 +5,14 @@ export interface DurableStore {
   claim<T>(key: string, value: T, ttlSeconds: number): Promise<boolean>;
   refreshClaim<T>(key: string, expectedValue: T, ttlSeconds: number): Promise<boolean>;
   releaseClaim<T>(key: string, expectedValue: T): Promise<boolean>;
+  /**
+   * Atomically replace a value that already exists, but only if it still
+   * equals `expected`. A plain read-then-set on a record with concurrent
+   * writers (a job a worker is dispatching while an operator cancels it, for
+   * example) can silently overwrite a transition made in between; this makes
+   * the writer's own stale read fail instead of winning by accident.
+   */
+  compareAndSet<T>(key: string, expected: T, next: T, ttlSeconds: number): Promise<boolean>;
   increment(key: string, ttlSeconds: number): Promise<number>;
   addToIndex(key: string, score: number, member: string): Promise<void>;
   readIndex(key: string, limit?: number): Promise<string[]>;
@@ -46,6 +54,10 @@ export function createRedisRestStore(url: string, token: string, fetcher: typeof
       const script = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end";
       return Number(await command<number>(["EVAL", script, 1, key, JSON.stringify(expectedValue), ttlSeconds])) === 1;
     },
+    async compareAndSet<T>(key: string, expected: T, next: T, ttlSeconds: number) {
+      const script = "if redis.call('get',KEYS[1])==ARGV[1] then redis.call('set',KEYS[1],ARGV[2],'EX',ARGV[3]) return 1 else return 0 end";
+      return Number(await command<number>(["EVAL", script, 1, key, JSON.stringify(expected), JSON.stringify(next), ttlSeconds])) === 1;
+    },
     async increment(key: string, ttlSeconds: number) {
       const response = await fetcher(`${endpoint}/multi-exec`, {
         method: "POST",
@@ -73,12 +85,18 @@ export class MemoryDurableStore implements DurableStore {
   private values = new Map<string, unknown>();
   private counters = new Map<string, number>();
   private indexes = new Map<string, Map<string, number>>();
-  async get<T>(key: string) { return (this.values.get(key) as T | undefined) ?? null; }
-  async set<T>(key: string, value: T, _ttlSeconds?: number) { this.values.set(key, value); }
+  // The real store round-trips every value through JSON over HTTP, so two
+  // reads of the same key are always independent objects. Storing raw
+  // references here instead would let a caller's in-place mutation of a
+  // "before" snapshot silently corrupt the "current" stored value ahead of
+  // any actual write, which breaks compareAndSet's premise that the two are
+  // genuinely independent.
+  async get<T>(key: string) { return this.values.has(key) ? structuredClone(this.values.get(key)) as T : null; }
+  async set<T>(key: string, value: T, _ttlSeconds?: number) { this.values.set(key, structuredClone(value)); }
   async delete(key: string) { this.values.delete(key); }
   async claim<T>(key: string, value: T, _ttlSeconds?: number) {
     if (this.values.has(key)) return false;
-    this.values.set(key, value);
+    this.values.set(key, structuredClone(value));
     return true;
   }
   async releaseClaim<T>(key: string, expectedValue: T) {
@@ -88,6 +106,11 @@ export class MemoryDurableStore implements DurableStore {
   }
   async refreshClaim<T>(key: string, expectedValue: T, _ttlSeconds: number) {
     return JSON.stringify(this.values.get(key)) === JSON.stringify(expectedValue);
+  }
+  async compareAndSet<T>(key: string, expected: T, next: T, _ttlSeconds?: number) {
+    if (JSON.stringify(this.values.get(key)) !== JSON.stringify(expected)) return false;
+    this.values.set(key, structuredClone(next));
+    return true;
   }
   async increment(key: string, _ttlSeconds?: number) {
     const next = (this.counters.get(key) ?? 0) + 1;
