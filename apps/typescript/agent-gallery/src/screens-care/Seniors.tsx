@@ -84,7 +84,7 @@ export function Seniors({ selectedId, attentionCases, resolvedIds, onSelect, onP
   function withdraw() {
     withdrawSeniorFromCare(selected.id, withdrawalDate());
     setWithdrawing(false);
-    onNotice(`${selected.preferredName} was withdrawn from care calls. Routines stopped; history was kept.`);
+    onNotice(`${selected.preferredName} was withdrawn from care in this workspace. History was kept; cancel any durable schedule or queued call separately.`);
   }
 
   function restore() {
@@ -191,8 +191,8 @@ export function Seniors({ selectedId, attentionCases, resolvedIds, onSelect, onP
             <section className="withdrawn-notice" role="status">
               <Icon name="attention" size={19} />
               <div>
-                <strong>Withdrawn from care calls{selected.withdrawnOn ? ` on ${selected.withdrawnOn}` : ""}.</strong>
-                <p>No routine is scheduled and no new call can be authorized. Call history and open care cases are kept.</p>
+                <strong>Withdrawn from care calls in this workspace{selected.withdrawnOn ? ` on ${selected.withdrawnOn}` : ""}.</strong>
+                <p>No routine is scheduled here and no new call can be authorized from here. Call history and open care cases are kept. This does not cancel any durable schedule or already-queued call — cancel those separately from the Calls console.</p>
               </div>
             </section>
           )}

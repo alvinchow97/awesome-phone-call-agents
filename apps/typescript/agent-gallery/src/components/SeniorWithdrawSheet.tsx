@@ -24,7 +24,7 @@ export function SeniorWithdrawSheet({ senior, impact, onClose, onWithdraw }: Sen
       <section aria-labelledby="senior-withdraw-title" aria-modal="true" className="call-sheet call-sheet--form" ref={sheetRef} role="dialog">
         <header className="call-sheet__header">
           <div>
-            <span className="dry-run-badge" data-tone="attention"><Icon name="attention" size={14} /> Stops all future calls</span>
+            <span className="dry-run-badge" data-tone="attention"><Icon name="attention" size={14} /> This workspace only</span>
             <h2 id="senior-withdraw-title">Withdraw {senior.preferredName} from care calls</h2>
             <p>The record stays visible so past calls and care cases keep their subject.</p>
           </div>
@@ -32,6 +32,15 @@ export function SeniorWithdrawSheet({ senior, impact, onClose, onWithdraw }: Sen
         </header>
 
         <div className="call-sheet__content">
+          <section className="boundary-note" data-tone="attention">
+            <Icon name="attention" size={18} />
+            <p>
+              This action only updates what this workspace shows for {senior.preferredName}, for this session. It does
+              not cancel any durable schedule or already-queued call — cancel those separately from the Calls console
+              before or after withdrawing here.
+            </p>
+          </section>
+
           <section className="preview-recipient">
             <SeniorAvatar initials={senior.initials} tone={senior.avatar} size="large" />
             <div>
@@ -43,15 +52,14 @@ export function SeniorWithdrawSheet({ senior, impact, onClose, onWithdraw }: Sen
 
           <div className="preview-policy-grid">
             <section className="policy-panel" data-kind="never">
-              <h3><Icon name="close" size={17} /> What stops</h3>
+              <h3><Icon name="close" size={17} /> What stops in this workspace</h3>
               <ul>
                 <li>
                   {impact.routineCount === 1
                     ? "1 care routine stops being scheduled."
                     : `${impact.routineCount} care routines stop being scheduled.`}
                 </li>
-                <li>No new call can be authorized for this senior.</li>
-                <li>Any queued occurrence is invalidated and needs fresh authority.</li>
+                <li>No new call can be authorized for this senior from here.</li>
               </ul>
             </section>
             <section className="policy-panel" data-kind="may">
@@ -70,7 +78,7 @@ export function SeniorWithdrawSheet({ senior, impact, onClose, onWithdraw }: Sen
 
           {impact.routineCount > 0 && (
             <section className="preview-block">
-              <p className="preview-label"><Icon name="routine" size={16} /> Routines that will stop</p>
+              <p className="preview-label"><Icon name="routine" size={16} /> Routines that will stop appearing as scheduled</p>
               <ul className="withdraw-routine-list">
                 {impact.routineTitles.map((title) => <li key={title}><Icon name="clock" size={15} /> {title}</li>)}
               </ul>
@@ -95,7 +103,6 @@ export function SeniorWithdrawSheet({ senior, impact, onClose, onWithdraw }: Sen
         </div>
 
         <footer className="call-sheet__footer">
-          <div><Icon name="info" size={17} /><span>Withdrawal applies to this demo session only.</span></div>
           <div className="call-sheet__actions">
             <button className="secondary-button" onClick={onClose} type="button">Keep in care</button>
             <button className="primary-button primary-button--attention" disabled={!confirmed} onClick={onWithdraw} type="button">
